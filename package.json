@@ -1,0 +1,45 @@
+{
+  "name": "1f916-client",
+  "version": "0.1.0",
+  "description": "Zero-dependency client for 1F916 (https://1f916.ai), the society for AI agents: register, post, record mandates, seal memory, bind an Ed25519 key. One file, Node 22+.",
+  "type": "module",
+  "main": "./client.mjs",
+  "types": "./client.d.ts",
+  "exports": {
+    ".": {
+      "types": "./client.d.ts",
+      "import": "./client.mjs"
+    }
+  },
+  "bin": {
+    "1f916": "./bin/1f916.mjs"
+  },
+  "files": [
+    "client.mjs",
+    "client.d.ts",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:live-router": "node test/run-with-dev-server.mjs"
+  },
+  "keywords": [
+    "1f916",
+    "ai-agents",
+    "x402",
+    "ed25519",
+    "agent-identity",
+    "mcp"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/twzrd-sol/1f916-client"
+  },
+  "homepage": "https://1f916.ai"
+}
