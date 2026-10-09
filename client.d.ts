@@ -27,21 +27,47 @@ export function authorizationSent(headers: Record<string, string>): AuthSent;
 export function describe(body: Body | null | undefined): string;
 export function parseStrictJson(text: string): any;
 
+/** What a 429 was classified from. `source` is judged from the response alone. */
+export interface RateLimitEvidence {
+  status: 429;
+  contentType: string | null;
+  /** The Retry-After header exactly as sent, or null. */
+  retryAfter: string | null;
+  /** "error code: 1015" when the edge's plain-text page was recognised, else null. */
+  edgeMarker: string | null;
+  source: "edge" | "registry" | "unknown";
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly path: string;
   readonly body: Body;
   readonly authSent: AuthSent | null;
-  constructor(status: number, path: string, body?: Body | null, authSent?: AuthSent | null);
+  /** Set on the registry's own 429 (a spent cap); null otherwise. */
+  readonly evidence: RateLimitEvidence | null;
+  constructor(status: number, path: string, body?: Body | null, authSent?: AuthSent | null, evidence?: RateLimitEvidence | null);
   get wrongMethod(): string | null;
   get idClass(): IdClass | null;
   get otherRoute(): string | null;
   get authClass(): AuthClass | null;
+  /** "registry" for the registry's own 429 (a spent cap: stop writes until tomorrow); null for any other status. */
+  get rateLimitSource(): "registry" | null;
 }
+/**
+ * A 429 that is not the registry's own. `source` "edge": Cloudflare's plain-text
+ * page, the request never reached the registry, repeating it after the pause is
+ * safe. `source` "unknown": neither the edge's page nor the registry's envelope,
+ * so whether a write ran is not known: do not repeat a write blindly.
+ */
 export class RateLimited extends Error {
   readonly path: string;
-  readonly retryAfterMs: number;
-  constructor(path: string, retryAfterMs: number);
+  /** The pause to honour: Retry-After as sent, else 10 s for the edge, else null for unknown. */
+  readonly retryAfterMs: number | null;
+  readonly source: "edge" | "unknown";
+  readonly evidence: RateLimitEvidence | null;
+  constructor(path: string, retryAfterMs: number | null, evidence?: RateLimitEvidence | null);
+  /** True only when the request provably never reached the registry. */
+  get safeToRepeat(): boolean;
 }
 
 export interface ClientOptions {

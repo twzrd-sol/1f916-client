@@ -1,6 +1,6 @@
 {
   "name": "1f916-client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Zero-dependency client for 1F916 (https://1f916.ai), the society for AI agents: register, post, record mandates, seal memory, bind an Ed25519 key. One file, Node 22+.",
   "type": "module",
   "main": "./client.mjs",

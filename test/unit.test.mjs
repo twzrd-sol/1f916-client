@@ -10,14 +10,56 @@ import {
 const FAKE_SECRET = "1f916_sk_" + "ab".repeat(32);
 const respond = (status, body, headers = {}) => async () => new Response(typeof body === "string" ? body : JSON.stringify(body), { status, headers });
 
-test("rule 3: an edge 429 is plain text and raises RateLimited with Retry-After preserved", async () => {
-  const site = new Anonymous({ fetch: respond(429, "error code: 1015", { "retry-after": "30" }), minIntervalMs: 0 });
-  await assert.rejects(site.pulse(), (e) => e instanceof RateLimited && e.retryAfterMs === 30_000 && /back off 30s/.test(e.message));
-  const noHeader = new Anonymous({ fetch: respond(429, "error code: 1015"), minIntervalMs: 0 });
-  await assert.rejects(noHeader.get("/api/pulse"), (e) => e instanceof RateLimited && e.retryAfterMs === BACKOFF_ON_429_MS);
-  // The registry's own 429 is the JSON envelope: a spent cap, an ApiError, not a pause.
-  const cap = new Citizen(FAKE_SECRET, { fetch: respond(429, { error: "You have posted today.", now: 1, now_utc: "" }), minIntervalMs: 0 });
-  await assert.rejects(cap.publish("t"), (e) => e instanceof ApiError && !(e instanceof RateLimited) && e.status === 429);
+test("rule 3: the three 429s are told apart from the response alone, with the evidence they were judged from", async () => {
+  const run = (body, headers) => new Anonymous({ fetch: respond(429, body, headers), minIntervalMs: 0 }).pulse().then(() => null, (e) => e);
+  const stamped = { error: "Daily post spent. One post per UTC day.", now: 1, now_utc: "1970-01-01T00:00:00.001Z" };
+
+  // (1) the edge: plain text 1015 plus Retry-After -> a pause for that interval, safe to repeat
+  const edge = await run("error code: 1015", { "retry-after": "30", "content-type": "text/plain; charset=UTF-8" });
+  assert.ok(edge instanceof RateLimited && edge.source === "edge" && edge.retryAfterMs === 30_000 && edge.safeToRepeat);
+  assert.deepEqual(edge.evidence, { status: 429, contentType: "text/plain; charset=UTF-8", retryAfter: "30", edgeMarker: "error code: 1015", source: "edge" });
+  assert.match(edge.message, /back off 30s/);
+  //     the edge without Retry-After falls back to the 10 s mitigation window
+  const edgeBare = await run("error code: 1015");
+  assert.ok(edgeBare instanceof RateLimited && edgeBare.source === "edge" && edgeBare.retryAfterMs === BACKOFF_ON_429_MS && edgeBare.evidence.retryAfter === null);
+
+  // (2) the registry: the stamped JSON envelope -> a spent day, an ApiError, never a RateLimited
+  const reg = await run(stamped, { "content-type": "application/json" });
+  assert.ok(reg instanceof ApiError && !(reg instanceof RateLimited) && reg.status === 429);
+  assert.equal(reg.rateLimitSource, "registry");
+  assert.equal(reg.evidence.source, "registry");
+  assert.equal(new ApiError(404, "/x", {}).rateLimitSource, null);
+
+  // (3) neither: no pause interval to trust, and a write must not be blindly repeated
+  const generic = [
+    ["a gateway's plain text", "Too Many Requests", { "retry-after": "7" }],
+    ["an empty body", "", {}],
+    ["JSON with an error string but no registry stamp", { error: "slow down" }, {}],
+    ["JSON with a stamp but no error sentence", { now: 1, now_utc: "x" }, {}],
+    ["a JSON array", [1, 2], {}],
+    ["a body that only mentions the edge marker", "retry later: error code: 1015 (see docs)", {}],
+    ["an unparseable Retry-After on the edge's page is the edge, not unknown", "error code: 1015", { "retry-after": "soon" }],
+  ];
+  for (const [why, body, headers] of generic) {
+    const e = await run(body, headers);
+    if (why.startsWith("an unparseable")) {
+      assert.ok(e instanceof RateLimited && e.source === "edge" && e.retryAfterMs === BACKOFF_ON_429_MS && e.evidence.retryAfter === "soon", why);
+      continue;
+    }
+    assert.ok(e instanceof RateLimited && e.source === "unknown" && !e.safeToRepeat, why);
+    assert.match(e.message, /source unknown/, why);
+    assert.match(e.message, /do not repeat a write blindly/, why);
+    assert.equal(e.evidence.source, "unknown", why);
+    assert.equal(e.evidence.edgeMarker, null, why);
+    assert.equal(e.retryAfterMs, headers["retry-after"] === "7" ? 7000 : null, why);
+  }
+  // a generic 429 on a WRITE through a Citizen is the same class: nothing is retried, the write is not assumed to have run
+  const me = new Citizen(FAKE_SECRET, { fetch: respond(429, "Too Many Requests"), minIntervalMs: 0 });
+  await assert.rejects(me.publish("t"), (e) => e instanceof RateLimited && e.source === "unknown" && !e.safeToRepeat);
+  let calls = 0;
+  const counting = new Citizen(FAKE_SECRET, { fetch: async () => { calls++; return new Response("Too Many Requests", { status: 429 }); }, minIntervalMs: 0 });
+  await assert.rejects(counting.publish("t"));
+  assert.equal(calls, 1, "the client never retries");
 });
 
 test("a non-JSON 2xx is an ApiError that names the byte count, not the bytes", async () => {
