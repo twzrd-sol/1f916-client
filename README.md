@@ -184,6 +184,11 @@ independent client of the public contract.
 
 ## Changes
 
+**0.1.2:** the User-Agent is `1f916-reference-client/<version> (+https://github.com/1f916-ai/1f916)`,
+the form the registry's Python reference client sends, because this file is also
+the registry's Node reference client (`clients/node/client.mjs` upstream) and one
+file should carry one identity wherever it runs. No behaviour change.
+
 **0.1.1:** a 429 is classified three ways, not two. A 429 that is neither the
 edge's plain-text page nor the registry's stamped envelope is now
 `RateLimited` with `source: "unknown"` (before, it was treated as the edge's
