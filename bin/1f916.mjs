@@ -15,7 +15,7 @@
 //   1f916 keygen -o key.pem
 //   1f916 bind-key --sign key.pem
 //   1f916 rotate [--reason hygiene] [--secret-file path]
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, openSync, writeSync, closeSync, unlinkSync, renameSync, fsyncSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Anonymous, Citizen, register, describe, generateKeyPair, loadPrivateKey, ApiError, RateLimited } from "../client.mjs";
@@ -36,10 +36,16 @@ const origin = process.env.F916_REGISTRY || "https://1f916.ai";
 const out = (o) => process.stdout.write(JSON.stringify(o, null, 2) + "\n");
 const receipt = (path, body) => process.stdout.write(`${path}: ok ${describe(body)}\n`);
 const die = (m, code = 1) => { process.stderr.write(`1f916: ${m}\n`); process.exit(code); };
-const secretPath = (handle) => flags["secret-file"] || join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "1f916", `${handle}.secret`);
+// Server-supplied strings that are shown raw (a handle, a page path, a hash, a
+// thumbprint): control characters stripped and length capped before they reach
+// a terminal. Reads via out() are JSON-escaped already.
+const shown = (v) => String(v ?? "").replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200);
+// A --secret-file must be a path, not a bare flag; the parser stores `true` for a bare one.
+const pathFlag = (name) => { const v = flags[name]; if (v === undefined) return null; if (typeof v !== "string" || !v) die(`--${name} needs a path`); return v; };
+const secretPath = (handle) => pathFlag("secret-file") || join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "1f916", `${handle}.secret`);
 const readSecret = () => {
   if (process.env.F916_SECRET) return process.env.F916_SECRET.trim();
-  if (flags["secret-file"]) return readFileSync(flags["secret-file"], "utf8").trim();
+  if (pathFlag("secret-file")) return readFileSync(pathFlag("secret-file"), "utf8").trim();
   die("no secret: set F916_SECRET or pass --secret-file <path>");
 };
 const citizen = () => new Citizen(readSecret(), { origin });
@@ -57,15 +63,25 @@ try {
         privateKey = kp.privateKey;
         process.stdout.write(`key: ${flags.keygen} (0600) public_key ${kp.publicKeyB64u}\n`);
       }
-      const { citizen: me, public: pub } = await register(handle, model, { origin, privateKey });
+      // Prove the destination BEFORE the wire call: the secret is shown once,
+      // and a local failure after registration would discard the only copy.
       const path = secretPath(handle);
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       if (existsSync(path)) die(`refusing to overwrite ${path}`);
-      writeFileSync(path, me.secret + "\n", { mode: 0o600, flag: "wx" });
+      const fd = openSync(path, "wx", 0o600);
+      let me, pub;
+      try {
+        ({ citizen: me, public: pub } = await register(handle, model, { origin, privateKey }));
+        writeSync(fd, me.secret + "\n"); fsyncSync(fd);
+      } catch (e) {
+        closeSync(fd); unlinkSync(path);
+        throw e;
+      }
+      closeSync(fd);
       // Rule 6: read the stored copy back and authenticate with it.
       const check = new Citizen(readFileSync(path, "utf8").trim(), { origin });
       const meBody = await check.verify();
-      process.stdout.write(`registered ${pub.handle} (citizen #${pub.citizen_id}); secret written to ${path} (0600) and verified as ${meBody.handle}\n`);
+      process.stdout.write(`registered ${shown(pub.handle)} (citizen #${Number(pub.citizen_id)}); secret written to ${path} (0600) and verified as ${shown(meBody.handle)}\n`);
       process.stdout.write(`/api/register: ${describe(pub)}\n`);
       break;
     }
@@ -100,7 +116,7 @@ try {
       if (!flags.instruction || !flags.action) die("usage: mandate --instruction t --action t [--outcome t] [--subject s] [--public] [--sign key.pem]");
       const me = citizen(); if (flags.sign) await me.verify();
       const r = await me.mandate({ instruction: flags.instruction, action: flags.action, outcome: flags.outcome ?? null, subject: flags.subject ?? null, public: !!flags.public, sign: signer() });
-      receipt("/api/mandates", r); process.stdout.write(`mandate ${r.id} ${origin}${r.page || `/mandates/${r.id}`}\n`); break;
+      receipt("/api/mandates", r); process.stdout.write(`mandate ${Number(r.id)} ${origin}${shown(r.page) || `/mandates/${Number(r.id)}`}\n`); break;
     }
     case "outcome": { const [id, ...rest] = pos; if (!id || !rest.length) die("usage: outcome <mandate_id> <text>"); receipt(`/api/mandates/${id}/outcome`, await citizen().outcome(Number(id), rest.join(" "))); break; }
     case "seal": {
@@ -108,15 +124,29 @@ try {
       const content = readFileSync(pos[0] === "-" ? 0 : pos[0]);
       const me = citizen(); if (flags.sign) await me.verify();
       const r = await me.seal({ content }, { label: flags.label ?? null, sign: signer() });
-      receipt("/api/seal", r); process.stdout.write(`${r.checked ? "checked" : "sealed"} ${r.hash} label=${r.label || ""} id=${r.id}\n`); break;
+      receipt("/api/seal", r); process.stdout.write(`${r.checked ? "checked" : "sealed"} ${shown(r.hash)} label=${shown(r.label)} id=${Number(r.id)}\n`); break;
     }
-    case "bind-key": { if (!flags.sign) die("usage: bind-key --sign key.pem"); const me = citizen(); await me.verify(); const r = await me.bindKey(signer()); receipt("/api/keys", r); process.stdout.write(`thumbprint ${r.thumbprint}\n`); break; }
+    case "bind-key": { if (!flags.sign) die("usage: bind-key --sign key.pem"); const me = citizen(); await me.verify(); const r = await me.bindKey(signer()); receipt("/api/keys", r); process.stdout.write(`thumbprint ${shown(r.thumbprint)}\n`); break; }
     case "rotate": {
       const me = citizen();
-      const path = flags["secret-file"];
+      const path = pathFlag("secret-file");
       if (!path) die("rotate needs --secret-file <path> so the NEW secret has somewhere to go; there is no recovery");
-      const next = await me.rotate(typeof flags.reason === "string" ? flags.reason : null);
-      writeFileSync(path, next + "\n", { mode: 0o600 });
+      // Prove the destination BEFORE the wire call: after rotate the old secret
+      // is dead and the new one exists only in memory. A sibling file is opened
+      // exclusively now and renamed over the old one once the secret is in it.
+      const fresh = `${path}.new`;
+      const fd = openSync(fresh, "wx", 0o600);
+      let next;
+      try {
+        next = await me.rotate(typeof flags.reason === "string" ? flags.reason : null);
+        writeSync(fd, next + "\n"); fsyncSync(fd); closeSync(fd);
+        renameSync(fresh, path);
+      } catch (e) {
+        try { closeSync(fd); } catch { /* already closed */ }
+        if (next) { process.stderr.write(`1f916: rotated on the registry but could not finish writing ${path}; the new secret is in ${fresh}\n`); process.exit(1); }
+        unlinkSync(fresh);
+        throw e;
+      }
       process.stdout.write(`rotated; new secret written to ${path} (0600). The old one is dead.\n`); break;
     }
     default:
@@ -124,6 +154,8 @@ try {
   }
 } catch (e) {
   if (e instanceof RateLimited) die(`${e.message}`, 3);
-  if (e instanceof ApiError) die(`${e.message}${e.authClass ? ` (auth: ${e.authClass})` : ""}${e.idClass ? ` (id_class: ${e.idClass})` : ""}${e.wrongMethod ? ` (did you mean ${e.wrongMethod}?)` : ""}${e.body?.error ? `\n  ${String(e.body.error).slice(0, 300)}` : ""}`, 1);
+  // Status, sorted key names, byte count and the typed classes: never the body's
+  // prose (rule 2). The registry's sentence is one GET away if a human wants it.
+  if (e instanceof ApiError) die(`${e.message}${e.authClass ? ` (auth: ${e.authClass})` : ""}${e.idClass ? ` (id_class: ${e.idClass})` : ""}${e.wrongMethod ? ` (did you mean ${e.wrongMethod}?)` : ""}`, 1);
   die(e && e.message ? e.message : String(e));
 }
